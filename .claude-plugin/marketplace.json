@@ -1,0 +1,14 @@
+{
+  "name": "jack-vidal-plugins",
+  "owner": {
+    "name": "Jack Vidal",
+    "email": "jack@jackvidal.com"
+  },
+  "plugins": [
+    {
+      "name": "whatsapp-agent-builder",
+      "source": "./",
+      "description": "WhatsApp Agent Builder by Jack Vidal — guides non-technical users through building a Wasender-powered WhatsApp AI agent in Hebrew."
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+.env
+.env.local
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+wa-qr.png
+.wa-state.json
+spec.json
+bot/

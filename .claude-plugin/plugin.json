@@ -1,0 +1,19 @@
+{
+  "name": "whatsapp-agent-builder",
+  "version": "0.1.0",
+  "description": "Build, deploy & maintain a WhatsApp AI agent powered by Wasender — no coding required. Hebrew-first guidance for non-technical users.",
+  "author": {
+    "name": "Jack Vidal",
+    "email": "jack@jackvidal.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "whatsapp",
+    "wasender",
+    "ai-agent",
+    "hebrew",
+    "no-code",
+    "fastapi"
+  ],
+  "homepage": "https://github.com/jackvidal/whatsapp-agent-builder"
+}
