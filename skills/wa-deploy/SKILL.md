@@ -69,42 +69,65 @@ Save to project-root `.env` as `RENDER_API_KEY`. Don't echo back.
 
 Use the Render API (POST /v1/services). The bot is a `web_service`.
 
+**Render API schema notes (verified live, 2026-05):**
+- `envVars` is **top-level** in the request body, not inside `serviceDetails`.
+- `buildCommand` and `startCommand` go **inside `serviceDetails.envSpecificDetails`** (NOT top-level, NOT `serviceDetails` directly). Putting them at the top level returns `"buildCommand is required for non-static, non-docker services"` even though they're set there.
+- `pythonVersion` also goes inside `envSpecificDetails`.
+- Use `runtime: "python"` (not the older `env: "python"` — Render accepts both but `runtime` is the current key).
+
+Use Python to build the JSON body so secrets stay in env vars and never appear in shell command output:
+
 ```bash
-curl -sX POST "https://api.render.com/v1/services" \
-  -H "Authorization: Bearer $RENDER_API_KEY" \
-  -H "Accept: application/json" \
-  -H "Content-Type: application/json" \
-  -d '{
+set -a; source "$ENV_FILE"; set +a
+export OWNER_ID="..."  # from GET /v1/owners
+
+python <<'PYEOF' > /tmp/render_create.json
+import json, os
+body = {
     "type": "web_service",
-    "name": "wa-bot-'$BOT_NAME_SLUG'",
-    "ownerId": "'$RENDER_OWNER_ID'",
-    "repo": "'$GITHUB_REPO_URL'",
+    "name": "wa-bot-" + os.environ["BOT_NAME_SLUG"],
+    "ownerId": os.environ["OWNER_ID"],
+    "repo": os.environ["GITHUB_REPO_URL"],
     "branch": "main",
     "autoDeploy": "yes",
     "rootDir": "",
-    "serviceDetails": {
-      "env": "python",
-      "plan": "free",
-      "region": "frankfurt",
-      "buildCommand": "pip install -r requirements.txt",
-      "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT",
-      "envSpecificDetails": { "pythonVersion": "3.12.7" },
-      "healthCheckPath": "/healthz",
-      "envVars": [
-        {"key": "WASENDER_API_KEY", "value": "'$WASENDER_API_KEY'"},
-        {"key": "WASENDER_WEBHOOK_SECRET", "value": "'$WASENDER_WEBHOOK_SECRET'"},
+    "envVars": [
+        {"key": "WASENDER_API_KEY", "value": os.environ["WASENDER_API_KEY"]},
+        {"key": "WASENDER_WEBHOOK_SECRET", "value": os.environ["WASENDER_WEBHOOK_SECRET"]},
         {"key": "WASENDER_ACCOUNT_PROTECTION", "value": "true"},
-        {"key": "ANTHROPIC_API_KEY", "value": "'$ANTHROPIC_API_KEY'"},
+        {"key": "ANTHROPIC_API_KEY", "value": os.environ["ANTHROPIC_API_KEY"]},
         {"key": "LLM_MODEL", "value": "claude-haiku-4-5"},
-        {"key": "MAX_HISTORY", "value": "20"}
-      ]
-    }
-  }'
+        {"key": "MAX_HISTORY", "value": "20"},
+    ],
+    "serviceDetails": {
+        "runtime": "python",
+        "plan": "free",
+        "region": "singapore",  # frankfurt for Israel, oregon for Americas, singapore for Asia
+        "envSpecificDetails": {
+            "pythonVersion": "3.12.7",
+            "buildCommand": "pip install -r requirements.txt",
+            "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT",
+        },
+        "healthCheckPath": "/healthz",
+    },
+}
+print(json.dumps(body))
+PYEOF
+
+curl -s -X POST "https://api.render.com/v1/services" \
+  -H "Authorization: Bearer $RENDER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @/tmp/render_create.json
+rm -f /tmp/render_create.json
 ```
 
-`RENDER_OWNER_ID` comes from `GET /v1/owners` — fetch it first.
+`OWNER_ID` comes from `GET /v1/owners` first:
+```bash
+curl -s "https://api.render.com/v1/owners" \
+  -H "Authorization: Bearer $RENDER_API_KEY" | jq -r '.[0].owner.id'
+```
 
-Region: prefer `frankfurt` for Israeli users (lowest latency). `oregon` or `singapore` if the user is elsewhere.
+Region: pick `frankfurt` for Israeli users (lowest latency to most Israeli ISPs), `oregon` for Americas, `singapore` for Asia/Pacific.
 
 Save the returned `service.id` and `service.serviceDetails.url` to `.wa-state.json` as `render_service_id` and `render_url`.
 
@@ -127,6 +150,10 @@ Expect `{"status":"ok"}`. If it fails, fetch the latest deploy logs (`GET /v1/se
 
 Now the critical bit: tell Wasender where to deliver inbound messages.
 
+**Branch on `setup_path`** from `.wa-state.json`:
+
+### Path A (PAT available) — programmatic
+
 ```bash
 curl -sX PUT "https://www.wasenderapi.com/api/whatsapp-sessions/$WASENDER_SESSION_ID" \
   -H "Authorization: Bearer $WASENDER_PAT" \
@@ -145,6 +172,23 @@ curl -sX GET "https://www.wasenderapi.com/api/whatsapp-sessions/$WASENDER_SESSIO
 ```
 
 Should return the Render URL.
+
+### Path B (no PAT, dashboard-managed session) — manual
+
+The user has to set the webhook URL via the dashboard. Tell them (in Hebrew):
+
+> עכשיו רק תעדכן את ה-Webhook ב-Wasender ידנית:
+> 1. גש ל-https://wasenderapi.com/dashboard ופתח את הסשן שלך.
+> 2. לחץ על **Manage Webhook** (כפתור ימני עליון).
+> 3. הדבק את הכתובת הזו בשדה **Webhook URL**:
+>    `{RENDER_URL}/webhook/wasender`
+> 4. סמן את האירוע `messages.received` (וגם `session.status` אם רוצים התראה על ניתוקים).
+> 5. **חשוב**: וודא שהשדה **Webhook Secret** זהה למה שיש ב-`.env` שלך (`WASENDER_WEBHOOK_SECRET`). אם לא, או החלף את אחד מהם, או צור חדש בשני המקומות.
+> 6. לחץ **Save**.
+>
+> תגיד לי "**שמרתי**" ואבדוק שהכל עובד.
+
+Wait for confirmation. Then proceed to step 8.
 
 ## Step 8 — Real round-trip test
 
@@ -186,6 +230,7 @@ If they want more: route to `wa-connect`. If stop: route to `wa-maintain` (idle 
 ## Common pitfalls
 
 - **Render free tier sleeps after 15 min idle.** First message after sleep takes ~30s to wake. Mention this to the user. Suggest the $7 paid tier if always-on matters.
+- **404 immediately after a fresh deploy.** Even on first deploy, Render's edge can return `404 Not Found` (10 bytes, plain text) for ~10–60s while the service is still spinning up internally. The deploy-status API may already say `live` while curl gets 404s. Don't panic and don't redeploy — wait 30s and retry `/healthz`. If it's still 404 after 90s, *then* something is genuinely wrong (check `GET /v1/services/{id}` for `suspended`, and check deploy events).
 - **Build fails on Python version.** If Render reports "no matching Python", check `.python-version` and/or set `PYTHON_VERSION=3.12.7` env var on the service.
 - **Webhook signature mismatch.** Triple-check `WASENDER_WEBHOOK_SECRET` env var on Render matches the one Wasender returned at session-create time. If user regenerated the secret in dashboard, update both Render env and `bot/.env` locally.
 - **Wasender returns 422 on PUT session.** Some fields may be read-only. If updating webhook fails, try `POST /api/whatsapp-sessions/{id}/webhook` (some accounts have a dedicated webhook endpoint — verify in their dashboard).
