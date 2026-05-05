@@ -102,13 +102,26 @@ async def wasender_webhook(request: Request):
     if seen_message(msg_id):
         return {"ok": True, "ignored": "duplicate"}
 
-    sender_phone = data.get("cleanedSenderPn") or key.get("remoteJid", "").split("@")[0]
+    sender_phone = data.get("cleanedSenderPn")
     text = data.get("messageBody")
+    remote_jid = key.get("remoteJid", "")
 
-    if not sender_phone or not text:
-        return {"ok": True, "ignored": "no_text_or_sender"}
+    if not remote_jid or not text:
+        return {"ok": True, "ignored": "no_text_or_jid"}
 
-    chat_id = f"+{sender_phone}"
+    if remote_jid.endswith("@g.us"):
+        return {"ok": True, "ignored": "group"}
+
+    # Critical: WhatsApp's privacy mode often hides the sender's phone behind a LID
+    # (Linked-device ID, JID like "1234567890@lid"). When that happens, cleanedSenderPn
+    # is None and remoteJid ends with "@lid" instead of "@s.whatsapp.net".
+    # We must reply to the same JID we received, NOT to a constructed +<lid> number —
+    # Wasender will 422 with "The provided JID does not exist on WhatsApp."
+    #
+    # Wasender's /send-message accepts both formats in `to`:
+    #   - E.164 with leading + (when we have a phone)
+    #   - Raw JID like "1234567890@lid" or "1234567890@s.whatsapp.net" (when we don't)
+    chat_id = f"+{sender_phone}" if sender_phone else remote_jid
 
     try:
         await handle_message(chat_id=chat_id, text=text)
@@ -124,7 +137,21 @@ async def healthz():
 
 ### Whitelist enforcement
 
-If `spec.audience.mode == "whitelist"`, before calling `handle_message`, check `chat_id in spec["audience"]["allowed_numbers"]`. If not, optionally send `audience.fallback_message` and return.
+If `spec.audience.mode == "whitelist"`, the whitelist check must accept **either** the JID or the `+phone` form, because the inbound `chat_id` will be one or the other depending on whether WhatsApp shared the sender's phone:
+
+```python
+def is_allowed(chat_id: str, sender_phone: str | None) -> bool:
+    if AUDIENCE.get("mode") != "whitelist":
+        return True
+    allowed = AUDIENCE.get("allowed_numbers", [])
+    if chat_id in allowed:
+        return True
+    if sender_phone and f"+{sender_phone}" in allowed:
+        return True
+    return False
+```
+
+When LID-mode is in effect, `cleanedSenderPn` is `None` and the only stable identifier you have is the LID JID (e.g. `124833811697866@lid`). Tell the user during `wa-characterize` that whitelisting works best when both parties have saved each other's numbers; otherwise fall back to LID-based whitelisting (paste the `@lid` string from the first inbound log line into `allowed_numbers`).
 
 ### Group messages
 

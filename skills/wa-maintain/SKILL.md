@@ -53,6 +53,10 @@ curl -s "$RENDER_URL/healthz"
 - Empty / 502 → service is asleep (Render free tier). Wait 30s, retry. If still failing: check Render logs.
 
 ### Step 4 — Webhook URL registered correctly with Wasender
+
+**Branch on `setup_path`** from `.wa-state.json`:
+
+**Path A (PAT available):**
 ```bash
 curl -s "https://www.wasenderapi.com/api/whatsapp-sessions/$WASENDER_SESSION_ID" \
   -H "Authorization: Bearer $WASENDER_PAT" | jq '{webhook_url, webhook_enabled, webhook_events}'
@@ -60,6 +64,14 @@ curl -s "https://www.wasenderapi.com/api/whatsapp-sessions/$WASENDER_SESSION_ID"
 Expect `webhook_url == $RENDER_URL + "/webhook/wasender"`, `webhook_enabled: true`, `messages.received` in events.
 
 If wrong: re-register (`PUT /api/whatsapp-sessions/{id}` with the right values — see `wa-deploy` step 7).
+
+**Path B (no PAT):**
+Ask the user to confirm visually in the dashboard:
+> תפתח את הסשן ב-https://wasenderapi.com/dashboard, תלחץ **Manage Webhook**. ותגיד לי:
+> 1. מה כתוב ב-Webhook URL?
+> 2. מסומן `messages.received`?
+
+Compare against `RENDER_URL + "/webhook/wasender"`. If mismatched, walk them through fixing it (same instructions as `wa-deploy` step 7 Path B).
 
 ### Step 5 — Webhook signature matches
 The most common silent failure: env var `WASENDER_WEBHOOK_SECRET` on Render doesn't match what Wasender is sending.
@@ -84,6 +96,24 @@ Check Render logs for recent POSTs to `/webhook/wasender` with 200 responses. If
 curl -s "https://www.wasenderapi.com/api/whatsapp-sessions/$WASENDER_SESSION_ID/session-logs?limit=20" \
   -H "Authorization: Bearer $WASENDER_PAT"
 ```
+
+### Step 6.5 — Sender arrived as a LID (modern WhatsApp privacy mode)
+
+If logs show `inbound msg_id=... remoteJid=...@lid cleanedSenderPn=None`, you've hit WhatsApp's LID privacy model. Symptoms:
+- Whitelist mode rejects the user even when their phone *should* be allowed
+- The fallback "you're not whitelisted" send 422s with `"The provided JID does not exist on WhatsApp."` because the bot is trying to send to `+<lid>` which isn't a real phone
+
+**Why it happens.** WhatsApp 2024-2025 anonymizes sender phone numbers behind LIDs (Linked-device IDs) when the sender hasn't saved the recipient's number. Wasender (Baileys-based) only receives what WhatsApp gives it.
+
+**Fix in code (should already be in `wa-build`'s generated `main.py`):**
+1. Use `remote_jid` as `chat_id` when `cleanedSenderPn` is `None` — preserves the `@lid` suffix.
+2. `is_allowed()` accepts either the JID *or* the `+phone` form for matching.
+3. Wasender's `/send-message` accepts both formats in `to` — sending to `<lid>@lid` works.
+
+**Workarounds if the user wants whitelist-only:**
+- Paste the LID into `spec.audience.allowed_numbers` (e.g. `"124833811697866@lid"`) — works but is opaque
+- Have the user save the bot's number in their phone contacts; sometimes WhatsApp then promotes future messages back to phone-mode (not guaranteed)
+- Switch to `audience.mode: "open"` and rely on the LLM's scope rules to decline non-target users
 
 ### Step 7 — LLM call is succeeding
 Check Render logs for `anthropic` / `openai` errors:
