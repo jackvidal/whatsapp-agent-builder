@@ -32,6 +32,12 @@ bot/
 
 Place this `bot/` folder inside the user's project directory.
 
+### Tool file naming convention
+
+`tools/__init__.py` auto-imports every `.py` file in the directory. **Never name a tool file the same as a Python stdlib module** — `calendar.py`, `email.py`, `json.py`, `logging.py`, `time.py`, `tokenize.py`, etc. Auto-import will shadow the stdlib import in subtle ways downstream (e.g. `from datetime import datetime` may break because `datetime` internally imports `calendar`).
+
+Convention: append `_tool` to anything that risks colliding. Use `calendar_tool.py`, `email_tool.py`, `json_tool.py`. The tool's *registered name* (the one the LLM sees) is independent of the filename — register `list_upcoming_events` from `calendar_tool.py` is fine.
+
 ## Step 1 — Read spec.json
 
 Load `./spec.json`. Extract:

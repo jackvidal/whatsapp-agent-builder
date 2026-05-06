@@ -18,12 +18,17 @@ Goal: pick the right storage backend for the user's situation. Default is fine f
 - ❌ Wiped on container restart.
 - 🟡 Works for testing, demos, "I'll redo this later."
 
-### 2. SQLite on Render Persistent Disk ($1/mo)
+### 2. SQLite on Render Starter + Persistent Disk (~$7.25/mo total)
 - Same SQLite file, but mounted on a 1GB persistent disk.
 - ✅ Survives redeploys and restarts.
 - ✅ Same simple code as default — no migration.
-- ❌ Disk only attaches to a single instance. If Render scales horizontally (paid tiers), only one container can write.
-- 🟡 Right answer for personal bots and small businesses.
+- ✅ **Bonus: always-on** — Starter plan removes the 15-min idle sleep, so first reply after a quiet period is instant.
+- ❌ Disk only attaches to a single instance. If Render scales horizontally (Standard+ plans), only one container can write.
+- 🟡 Right answer for personal bots that store anything sensitive (OAuth tokens, conversation history) — and the right answer the moment the user wires Calendar/Gmail.
+
+**⚠️ Pricing reality:** Persistent disks **require Starter plan ($7/mo) as a prerequisite** — they're not supported on Free tier. The disk addon itself is ~$0.25/mo for 1GB. Total: **~$7.25/mo**. (Earlier versions of this skill said "$1/mo" — that was wrong; Render won't even let you attach a disk to a free-tier service. The API returns `disk not supported for free tier service`.)
+
+**⚠️ Plan upgrades require the dashboard, not the API.** `PATCH /v1/services` with `{serviceDetails: {plan: "starter"}}` returns HTTP 500. Walk the user through clicking **Settings → Instance Type → Starter → Save** in the Render dashboard. Confirm the change took effect by polling `GET /v1/services/{id}` and checking `serviceDetails.plan == "starter"` before attempting to attach the disk.
 
 ### 3. Supabase Postgres (free tier, then $25/mo)
 - Managed Postgres, accessed via `DATABASE_URL`.
@@ -48,8 +53,8 @@ Goal: pick the right storage backend for the user's situation. Default is fine f
 > 4 אפשרויות:
 >
 > **א. הזמני שיש כרגע** — חינם, נמחק בכל עדכון. טוב לבדיקות.
-> **ב. דיסק מתמיד ב-Render** — $1 בחודש. נשמר תמיד. הכי קל.
-> **ג. Supabase** — חינם בהתחלה, $25 כשגדל. שירות מסודר עם ממשק לבדיקת הנתונים.
+> **ב. Render Starter + דיסק קבוע** — בערך $7.25 לחודש. נשמר תמיד והבוט לא נרדם. הכי קל ברגע שמחברים יומן/מייל.
+> **ג. Supabase** — חינם בהתחלה, $25 כשגדל. שירות חיצוני עם ממשק יפה.
 > **ד. Postgres ב-Render** — $7 בחודש. הכי מהיר ויציב, עם גיבויים.
 >
 > מה מתאים לך?
@@ -62,21 +67,50 @@ Default recommendation per archetype (offer it but let user override):
 
 ## Migration steps
 
-### Option ב — Render Persistent Disk
+### Option ב — Render Starter + Persistent Disk
 
-1. Add a disk to the existing Render service via API:
-```bash
-curl -sX POST "https://api.render.com/v1/services/$RENDER_SERVICE_ID/disks" \
-  -H "Authorization: Bearer $RENDER_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "bot-data", "mountPath": "/var/data", "sizeGB": 1}'
-```
+**Order matters.** Do these in sequence — skipping or reordering will fail with the errors noted.
 
-2. Update Render env: `DB_PATH=/var/data/bot.db`.
-3. Trigger a redeploy.
-4. Verify: `curl $RENDER_URL/healthz` after deploy completes.
+1. **Verify (or trigger) the plan upgrade to Starter** — disk-attach will fail on Free with `disk not supported for free tier service` (HTTP 400):
+   ```bash
+   curl -s "https://api.render.com/v1/services/$RENDER_SERVICE_ID" \
+     -H "Authorization: Bearer $RENDER_API_KEY" \
+     | python -c "import sys,json; print(json.load(sys.stdin)['serviceDetails']['plan'])"
+   ```
+   If output is `free`, hand off to the user with this exact instruction:
+   > תפתח את https://dashboard.render.com/web/$RENDER_SERVICE_ID/settings, גלגל ל-**Instance Type**, תלחץ Change, תבחר **Starter** ($7/חודש), תשמור. תגיד לי "**שודרג**" כשהבאדג' למעלה אומר Starter.
+   
+   Wait for confirmation, then re-poll `serviceDetails.plan` until it's `starter`.
 
-The history will be empty after the first migrated deploy (the old disk is gone). Tell the user:
+2. **Attach the disk** — endpoint is **top-level `/v1/disks`**, NOT `/v1/services/{id}/disks` or `/v1/services/{id}/disk` (both return 404):
+   ```bash
+   curl -sX POST "https://api.render.com/v1/disks" \
+     -H "Authorization: Bearer $RENDER_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d "{\"serviceId\": \"$RENDER_SERVICE_ID\", \"name\": \"bot-data\", \"mountPath\": \"/var/data\", \"sizeGB\": 1}"
+   ```
+   Successful response is HTTP 201 with the disk ID.
+
+3. **Update `DB_PATH` env var** to the new mount path:
+   ```bash
+   curl -sX PUT "https://api.render.com/v1/services/$RENDER_SERVICE_ID/env-vars/DB_PATH" \
+     -H "Authorization: Bearer $RENDER_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"value": "/var/data/bot.db"}'
+   ```
+
+4. **Trigger a redeploy** — the env var change alone doesn't always retrigger:
+   ```bash
+   curl -sX POST "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys" \
+     -H "Authorization: Bearer $RENDER_API_KEY" \
+     -H "Content-Type: application/json" -d '{}'
+   ```
+
+5. **Wait for `live`, then verify** `curl $RENDER_URL/healthz` returns 200. Allow ~30s for cold-start after the deploy reports `live`.
+
+**⚠️ Critical: do NOT update `DB_PATH` before the disk is attached.** If you do, the bot will crash-loop on startup with `sqlite3.OperationalError: unable to open database file` because `/var/data/` doesn't exist as a directory yet. Fix order: disk first, then env var.
+
+The history is empty after the first migrated deploy (the old ephemeral disk is gone). Tell the user:
 > ההיסטוריה הקיימת תיעלם בעדכון הזה (לא היה איפה לשמור אותה). מהיום והלאה — נשמר.
 
 ### Option ג — Supabase
